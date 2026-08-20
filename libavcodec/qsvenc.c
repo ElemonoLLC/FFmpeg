@@ -582,6 +582,8 @@ static int select_rc_mode(AVCodecContext *avctx, QSVEncContext *q)
         return AVERROR(ENOSYS);
     }
 
+	av_log(avctx, AV_LOG_WARNING, "DEBUG: global_quality=%d\n", avctx->global_quality);
+
     if (want_la + want_qscale + want_vcm > 1) {
         av_log(avctx, AV_LOG_ERROR,
                "More than one of: { constant qscale, lookahead, VCM } requested, "

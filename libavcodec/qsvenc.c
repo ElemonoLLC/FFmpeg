@@ -963,8 +963,8 @@ static int init_video_param(AVCodecContext *avctx, QSVEncContext *q)
         q->extco2.LookAheadDepth = q->look_ahead_depth;
         av_fallthrough;
     case MFX_RATECONTROL_ICQ:
-        av_log(avctx, AV_LOG_WARNING, "DEBUG: global_quality = %d, ICQQuality will be set to %d\n", 
-               avctx->global_quality, av_clip(avctx->global_quality, 1, 51));
+        av_log(avctx, AV_LOG_WARNING, "DEBUG: global_quality = %d, ICQQuality will be set to %d, rc_max_rate=%lld\n", 
+               avctx->global_quality, av_clip(avctx->global_quality, 1, 51), (long long)avctx->rc_max_rate);
         q->param.mfx.ICQQuality  = av_clip(avctx->global_quality, 1, 51);
         if (avctx->rc_max_rate > 0) {
             q->param.mfx.MaxKbps   = max_bitrate_kbps / brc_param_multiplier;

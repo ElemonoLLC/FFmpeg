@@ -281,7 +281,10 @@ static int enc_reopen(void *opaque, const AVFrame *frame,
         enc_ctx->codec_tag  = e->codec_tag;
     enc_ctx->flags         |= e->flags;
     enc_ctx->flags2        |= e->flags2;
-    enc_ctx->global_quality = e->global_quality;
+    // Only set global_quality from e->global_quality if it's non-zero
+    // Otherwise, keep the value set by av_opt_set_dict2() from command-line options
+    if (e->global_quality > 0)
+        enc_ctx->global_quality = e->global_quality;
 
     // the timebase is chosen by filtering code
     if (ost->type == AVMEDIA_TYPE_AUDIO || ost->type == AVMEDIA_TYPE_VIDEO) {

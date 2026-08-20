@@ -620,7 +620,7 @@ static int select_rc_mode(AVCodecContext *avctx, QSVEncContext *q)
             return AVERROR(EINVAL);
         }
     }
-    else if (avctx->global_quality > 0 && !avctx->rc_max_rate) {
+    else if (avctx->global_quality > 0) {
         rc_mode = MFX_RATECONTROL_ICQ;
         rc_desc = "intelligent constant quality (ICQ)";
     }
@@ -955,6 +955,9 @@ static int init_video_param(AVCodecContext *avctx, QSVEncContext *q)
         av_fallthrough;
     case MFX_RATECONTROL_ICQ:
         q->param.mfx.ICQQuality  = av_clip(avctx->global_quality, 1, 51);
+        if (avctx->rc_max_rate > 0) {
+            q->param.mfx.MaxKbps   = max_bitrate_kbps / brc_param_multiplier;
+        }
         break;
     }
 

@@ -1411,8 +1411,14 @@ rc_mode_found:
             rc_target_percentage = 100;
         }
     } else {
-        rc_bits_per_second   = 0;
-        rc_target_percentage = 100;
+        // For ICQ mode, use rc_max_rate if available to set an upper bound
+        if (rc_mode->va_mode == VA_RC_ICQ && avctx->rc_max_rate > 0) {
+            rc_bits_per_second   = avctx->rc_max_rate;
+            rc_target_percentage = 100;
+        } else {
+            rc_bits_per_second   = 0;
+            rc_target_percentage = 100;
+        }
     }
 
     if (rc_mode->quality) {

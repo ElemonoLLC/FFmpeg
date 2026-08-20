@@ -624,6 +624,12 @@ static int select_rc_mode(AVCodecContext *avctx, QSVEncContext *q)
         rc_mode = MFX_RATECONTROL_ICQ;
         rc_desc = "intelligent constant quality (ICQ)";
     }
+    else if (q->param.mfx.RateControlMethod == MFX_RATECONTROL_ICQ ||
+             q->param.mfx.RateControlMethod == MFX_RATECONTROL_LA_ICQ) {
+        av_log(avctx, AV_LOG_ERROR, "ICQ rate control requires global_quality to be set. "
+               "Please use -global_quality <value> option.\n");
+        return AVERROR(EINVAL);
+    }
     else if (avctx->bit_rate) {
         if (avctx->rc_max_rate == avctx->bit_rate) {
             rc_mode = MFX_RATECONTROL_CBR;
@@ -660,7 +666,8 @@ static int select_rc_mode(AVCodecContext *avctx, QSVEncContext *q)
     }
 
     q->param.mfx.RateControlMethod = rc_mode;
-    av_log(avctx, AV_LOG_VERBOSE, "Using the %s ratecontrol method\n", rc_desc);
+    av_log(avctx, AV_LOG_WARNING, "DEBUG: Selected rate control method: %s (global_quality=%d, bit_rate=%lld, rc_max_rate=%lld)\n", 
+           rc_desc, avctx->global_quality, (long long)avctx->bit_rate, (long long)avctx->rc_max_rate);
 
     return 0;
 }
@@ -954,9 +961,12 @@ static int init_video_param(AVCodecContext *avctx, QSVEncContext *q)
         q->extco2.LookAheadDepth = q->look_ahead_depth;
         av_fallthrough;
     case MFX_RATECONTROL_ICQ:
+        av_log(avctx, AV_LOG_WARNING, "DEBUG: global_quality = %d, ICQQuality will be set to %d\n", 
+               avctx->global_quality, av_clip(avctx->global_quality, 1, 51));
         q->param.mfx.ICQQuality  = av_clip(avctx->global_quality, 1, 51);
         if (avctx->rc_max_rate > 0) {
             q->param.mfx.MaxKbps   = max_bitrate_kbps / brc_param_multiplier;
+            av_log(avctx, AV_LOG_WARNING, "DEBUG: MaxKbps = %d\n", max_bitrate_kbps / brc_param_multiplier);
         }
         break;
     }

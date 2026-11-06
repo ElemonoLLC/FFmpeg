@@ -1410,6 +1410,11 @@ rc_mode_found:
             rc_bits_per_second   = avctx->bit_rate;
             rc_target_percentage = 100;
         }
+    } else if (rc_mode->va_mode == VA_RC_ICQ && avctx->rc_max_rate > 0) {
+        // ICQ has no target rate; a max rate is passed to the driver as an
+        // explicit bitrate cap.
+        rc_bits_per_second   = avctx->rc_max_rate;
+        rc_target_percentage = 100;
     } else {
         rc_bits_per_second   = 0;
         rc_target_percentage = 100;

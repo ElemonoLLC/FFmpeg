@@ -143,9 +143,9 @@ static void maxrate_update_bias(AVCodecContext *avctx, QSVAV1EncContext *q)
 
     if (rate <= 0)
         return;
-    /* Error is clamped to [-max, +8*max], so one packet moves the bias by at
-     * most BIAS_FP / MAXRATE_GAIN_DIV units. */
-    err = av_clip64(rate - max, -max, 8 * max);
+    /* Error is clamped to [-max, +2*max], so one packet moves the bias by at
+     * most 2 * BIAS_FP / MAXRATE_GAIN_DIV units upward. */
+    err = av_clip64(rate - max, -max, 2 * max);
     q->qp_bias_fp = av_clip64(q->qp_bias_fp +
                               err * BIAS_FP / (max * MAXRATE_GAIN_DIV),
                               0, QP_BIAS_MAX * BIAS_FP);

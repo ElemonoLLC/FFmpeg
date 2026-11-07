@@ -20,6 +20,8 @@
 
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/types.h>
 
 #include "libavutil/common.h"
@@ -39,13 +41,60 @@ typedef struct QSVAV1EncContext {
     QSVEncContext qsv;
 } QSVAV1EncContext;
 
+/* EXPERIMENTAL: per-frame QP test hook. If QSV_AV1_QP_SCHEDULE names a file
+ * with one QP per line (in input order), each frame's mfxEncodeCtrl.QP is set
+ * from it. Only effective in CQP mode. Not the final side-data design. */
+static int *qp_sched;
+static int qp_sched_n, qp_sched_idx, qp_sched_loaded;
+
+static void qp_sched_load(AVCodecContext *avctx)
+{
+    const char *path = getenv("QSV_AV1_QP_SCHEDULE");
+    FILE *f;
+    int v;
+
+    qp_sched_loaded = 1;
+    if (!path)
+        return;
+    f = fopen(path, "r");
+    if (!f) {
+        av_log(avctx, AV_LOG_WARNING, "QP schedule %s not readable\n", path);
+        return;
+    }
+    while (fscanf(f, "%d", &v) == 1) {
+        int *n = realloc(qp_sched, (qp_sched_n + 1) * sizeof(*qp_sched));
+        if (!n)
+            break;
+        qp_sched = n;
+        qp_sched[qp_sched_n++] = v;
+    }
+    fclose(f);
+    av_log(avctx, AV_LOG_INFO, "Loaded %d per-frame QPs from %s\n", qp_sched_n, path);
+}
+
 static int qsv_av1_set_encode_ctrl(AVCodecContext *avctx,
                                    const AVFrame *frame, mfxEncodeCtrl *enc_ctrl)
 {
     QSVAV1EncContext *q = avctx->priv_data;
     AVFrameSideData *sd;
 
-    if (!frame || !QSV_RUNTIME_VERSION_ATLEAST(q->qsv.ver, 2, 11))
+    if (!frame)
+        return 0;
+
+    if (!qp_sched_loaded)
+        qp_sched_load(avctx);
+    if (qp_sched_idx < qp_sched_n) {
+        int qp = qp_sched[qp_sched_idx];
+        /* QSV_AV1_QP_TYPE_OFFSETS=1: keep the encoder's own I-frame offset
+         * (QPI - QPP from -q:v) on top of the schedule value for keyframes. */
+        if (getenv("QSV_AV1_QP_TYPE_OFFSETS") && q->qsv.param.mfx.GopPicSize > 0 &&
+            qp_sched_idx % q->qsv.param.mfx.GopPicSize == 0)
+            qp += (int)q->qsv.param.mfx.QPI - (int)q->qsv.param.mfx.QPP;
+        qp_sched_idx++;
+        enc_ctrl->QP = (mfxU16)av_clip(qp, 1, 255);
+    }
+
+    if (!QSV_RUNTIME_VERSION_ATLEAST(q->qsv.ver, 2, 11))
         return 0;
 
     sd = av_frame_get_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);

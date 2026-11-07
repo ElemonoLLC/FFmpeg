@@ -2669,6 +2669,9 @@ int ff_qsv_encode(AVCodecContext *avctx, QSVEncContext *q,
         qpkt.pkt.pts  = av_rescale_q(qpkt.bs->TimeStamp,       (AVRational){1, 90000}, avctx->time_base);
         qpkt.pkt.size = qpkt.bs->DataLength;
 
+        if (q->packet_done_cb)
+            q->packet_done_cb(avctx, qpkt.bs->TimeStamp, qpkt.bs->DataLength);
+
         if (qpkt.bs->FrameType & MFX_FRAMETYPE_IDR || qpkt.bs->FrameType & MFX_FRAMETYPE_xIDR) {
             qpkt.pkt.flags |= AV_PKT_FLAG_KEY;
             pict_type = AV_PICTURE_TYPE_I;

@@ -152,6 +152,9 @@ extern const AVCodecHWConfigInternal *const ff_qsv_enc_hw_configs[];
 
 typedef int SetEncodeCtrlCB (AVCodecContext *avctx,
                              const AVFrame *frame, mfxEncodeCtrl* enc_ctrl);
+/* Called once per output packet with its 90 kHz timestamp and size in bytes. */
+typedef void PacketDoneCB (AVCodecContext *avctx, uint64_t timestamp_90k,
+                           uint32_t data_len);
 typedef struct QSVEncContext {
     AVCodecContext *avctx;
 
@@ -264,6 +267,7 @@ typedef struct QSVEncContext {
 #endif
     char *load_plugins;
     SetEncodeCtrlCB *set_encode_ctrl_cb;
+    PacketDoneCB *packet_done_cb;
     int forced_idr;
     int low_delay_brc;
 

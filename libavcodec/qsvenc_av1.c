@@ -35,10 +35,29 @@
 #include "qsv.h"
 #include "qsvenc.h"
 
+/* -maxrate in CQP mode: the SDK has no rate cap for CQP, so the output rate is
+ * measured over a sliding window of output timestamps and a non-negative QP
+ * bias is added to the base QP while the window exceeds avctx->rc_max_rate. */
+#define MAXRATE_WIN_TICKS 90000   /* 1 s on the 90 kHz output timestamp clock */
+#define MAXRATE_WIN_CAP   1024    /* max packets tracked in the window */
+#define QP_BIAS_MAX       255
+#define BIAS_FP           16      /* fixed-point units per QP step */
+#define MAXRATE_GAIN_DIV  1       /* QP step per packet = error/max / this (error is in units of max) */
+
 typedef struct QSVAV1EncContext {
     AVClass *class;
     AVBSFContext *extra_data_bsf;
     QSVEncContext qsv;
+
+    int maxrate_feedback;
+    int64_t qp_bias_fp;       /* BIAS_FP units per QP step */
+    int qp_bias;
+    struct {
+        uint64_t ts;
+        uint64_t bits;
+    } win[MAXRATE_WIN_CAP];
+    int win_head, win_count;
+    uint64_t win_bits;
 } QSVAV1EncContext;
 
 /* EXPERIMENTAL: per-frame QP test hook. If QSV_AV1_QP_SCHEDULE names a file
@@ -72,6 +91,78 @@ static void qp_sched_load(AVCodecContext *avctx)
     av_log(avctx, AV_LOG_INFO, "Loaded %d per-frame QPs from %s\n", qp_sched_n, path);
 }
 
+static void maxrate_win_push(QSVAV1EncContext *q, uint64_t ts, uint64_t bits)
+{
+    int idx;
+
+    if (q->win_count == MAXRATE_WIN_CAP) {
+        q->win_bits -= q->win[q->win_head].bits;
+        q->win_head = (q->win_head + 1) % MAXRATE_WIN_CAP;
+        q->win_count--;
+    }
+    idx = (q->win_head + q->win_count) % MAXRATE_WIN_CAP;
+    q->win[idx].ts   = ts;
+    q->win[idx].bits = bits;
+    q->win_count++;
+    q->win_bits += bits;
+
+    /* Drop packets more than one window older than the newest one. The
+     * unsigned difference is cast so out-of-order timestamps are not dropped. */
+    while (q->win_count > 1 &&
+           (int64_t)(ts - q->win[q->win_head].ts) > MAXRATE_WIN_TICKS) {
+        q->win_bits -= q->win[q->win_head].bits;
+        q->win_head = (q->win_head + 1) % MAXRATE_WIN_CAP;
+        q->win_count--;
+    }
+}
+
+/* Returns the windowed output rate in bit/s, or 0 when there is not yet
+ * enough history for a meaningful estimate. */
+static int64_t maxrate_win_bps(const QSVAV1EncContext *q)
+{
+    uint64_t newest, oldest, span;
+
+    if (q->win_count < 2)
+        return 0;
+    newest = q->win[(q->win_head + q->win_count - 1) % MAXRATE_WIN_CAP].ts;
+    oldest = q->win[q->win_head].ts;
+    span   = newest - oldest;
+    if (span < MAXRATE_WIN_TICKS / 4)
+        return 0;
+    return (int64_t)(q->win_bits * 90000 / span);
+}
+
+/* Integral controller, updated once per output packet. The window rate lags
+ * the QP change by about one window, so updating per submitted frame would
+ * keep integrating a stale error and oscillate. */
+static void maxrate_update_bias(AVCodecContext *avctx, QSVAV1EncContext *q)
+{
+    int64_t rate = maxrate_win_bps(q);
+    int64_t max  = avctx->rc_max_rate;
+    int64_t err;
+
+    if (rate <= 0)
+        return;
+    /* Error is clamped to [-max, +8*max], so one packet moves the bias by at
+     * most BIAS_FP / MAXRATE_GAIN_DIV units. */
+    err = av_clip64(rate - max, -max, 8 * max);
+    q->qp_bias_fp = av_clip64(q->qp_bias_fp +
+                              err * BIAS_FP / (max * MAXRATE_GAIN_DIV),
+                              0, QP_BIAS_MAX * BIAS_FP);
+    q->qp_bias = (int)(q->qp_bias_fp / BIAS_FP);
+}
+
+static void qsv_av1_packet_done(AVCodecContext *avctx, uint64_t timestamp_90k,
+                                uint32_t data_len)
+{
+    QSVAV1EncContext *q = avctx->priv_data;
+
+    if (!q->maxrate_feedback)
+        return;
+    maxrate_win_push(q, timestamp_90k, (uint64_t)data_len * 8);
+    maxrate_update_bias(avctx, q);
+}
+
 static int qsv_av1_set_encode_ctrl(AVCodecContext *avctx,
                                    const AVFrame *frame, mfxEncodeCtrl *enc_ctrl)
 {
@@ -83,15 +174,37 @@ static int qsv_av1_set_encode_ctrl(AVCodecContext *avctx,
 
     if (!qp_sched_loaded)
         qp_sched_load(avctx);
-    if (qp_sched_idx < qp_sched_n) {
-        int qp = qp_sched[qp_sched_idx];
-        /* QSV_AV1_QP_TYPE_OFFSETS=1: keep the encoder's own I-frame offset
-         * (QPI - QPP from -q:v) on top of the schedule value for keyframes. */
-        if (getenv("QSV_AV1_QP_TYPE_OFFSETS") && q->qsv.param.mfx.GopPicSize > 0 &&
-            qp_sched_idx % q->qsv.param.mfx.GopPicSize == 0)
-            qp += (int)q->qsv.param.mfx.QPI - (int)q->qsv.param.mfx.QPP;
-        qp_sched_idx++;
-        enc_ctrl->QP = (mfxU16)av_clip(qp, 1, 255);
+
+    {
+        int qp = 0, qp_set = 0;
+
+        if (qp_sched_idx < qp_sched_n) {
+            qp = qp_sched[qp_sched_idx];
+            /* QSV_AV1_QP_TYPE_OFFSETS=1: keep the encoder's own I-frame offset
+             * (QPI - QPP from -q:v) on top of the schedule value for keyframes. */
+            if (getenv("QSV_AV1_QP_TYPE_OFFSETS") && q->qsv.param.mfx.GopPicSize > 0 &&
+                qp_sched_idx % q->qsv.param.mfx.GopPicSize == 0)
+                qp += (int)q->qsv.param.mfx.QPI - (int)q->qsv.param.mfx.QPP;
+            qp_sched_idx++;
+            qp_set = 1;
+        }
+
+        if (q->maxrate_feedback) {
+            if (q->qp_bias > 0) {
+                /* Without a schedule the SDK would pick QPI/QPP/QPB itself, so
+                 * the bias needs an explicit base: QPI for I frames, else QPP.
+                 * B frames therefore lose their QPB offset while biased. */
+                if (!qp_set) {
+                    qp = frame->pict_type == AV_PICTURE_TYPE_I ?
+                         (int)q->qsv.param.mfx.QPI : (int)q->qsv.param.mfx.QPP;
+                    qp_set = 1;
+                }
+                qp += q->qp_bias;
+            }
+        }
+
+        if (qp_set)
+            enc_ctrl->QP = (mfxU16)av_clip(qp, 1, 255);
     }
 
     if (!QSV_RUNTIME_VERSION_ATLEAST(q->qsv.ver, 2, 11))
@@ -180,8 +293,28 @@ static av_cold int qsv_enc_init(AVCodecContext *avctx)
     }
 
     q->qsv.set_encode_ctrl_cb = qsv_av1_set_encode_ctrl;
+    q->qsv.packet_done_cb     = qsv_av1_packet_done;
 
-    return ff_qsv_enc_init(avctx, &q->qsv);
+    ret = ff_qsv_enc_init(avctx, &q->qsv);
+    if (ret < 0)
+        return ret;
+
+    /* select_rc_mode() picks CQP over -maxrate, so the cap is applied here by
+     * feedback. QSV_AV1_MAXRATE_FEEDBACK=0 disables it for A/B comparison. */
+    if (avctx->rc_max_rate > 0 &&
+        q->qsv.param.mfx.RateControlMethod == MFX_RATECONTROL_CQP) {
+        const char *env = getenv("QSV_AV1_MAXRATE_FEEDBACK");
+        q->maxrate_feedback = !(env && env[0] == '0');
+        if (q->maxrate_feedback)
+            av_log(avctx, AV_LOG_VERBOSE, "CQP with -maxrate %"PRId64" bit/s: "
+                   "enforcing the rate cap by per-frame QP feedback\n",
+                   (int64_t)avctx->rc_max_rate);
+        else
+            av_log(avctx, AV_LOG_WARNING, "CQP with -maxrate: feedback disabled "
+                   "by QSV_AV1_MAXRATE_FEEDBACK=0, rate cap not enforced\n");
+    }
+
+    return 0;
 }
 
 static int qsv_enc_frame(AVCodecContext *avctx, AVPacket *pkt,
